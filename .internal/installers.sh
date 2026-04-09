@@ -20,6 +20,7 @@ gc_run_selected_installers() {
       runtime) gc_install_runtime ;;
       chromium) gc_install_chromium ;;
       sunlogin) gc_install_sunlogin ;;
+      qt) gc_install_qt ;;
       *) gc_die "未知软件 ID: ${software_id}" ;;
     esac
     gc_log_success "安装器执行完成: ${software_id}"
@@ -27,7 +28,7 @@ gc_run_selected_installers() {
 }
 
 gc_install_runtime() {
-  local package_zip="${GC_PACKAGES_DIR}/install_runtime.zip"
+  local package_zip="${GC_PACKAGES_DIR}/${GC_RUNTIME_PACKAGE_FILE}"
   local tmp_dir=""
   local current_python_target=""
   local existing_markers=()
@@ -61,6 +62,7 @@ gc_install_runtime() {
     gc_log_info "dry-run: 将解压 ${package_zip}"
     gc_log_info "dry-run: 将准备内核目录 ${build_path}"
     gc_log_info "dry-run: 将调用 wasom_codex_install_arm64.sh -p ${RUNTIME_INSTALL_PATH} -d ${RUNTIME_DATA_PATH}"
+    gc_log_info "dry-run: 将自动输入 b 以源码编译 EtherCAT"
     gc_log_info "dry-run: 将配置 EtherCAT 网卡 ${RUNTIME_ETHERCAT_IFACE} / 驱动 ${RUNTIME_ETHERCAT_DRIVER}"
     gc_request_reboot "runtime 安装后通常需要重启，使 EtherCAT 和 plc-runtime 生效。"
     return 0
@@ -111,7 +113,7 @@ gc_install_runtime() {
 }
 
 gc_install_chromium() {
-  local package_zip="${GC_PACKAGES_DIR}/chromium_installer_rpm.zip"
+  local package_zip="${GC_PACKAGES_DIR}/${GC_CHROMIUM_PACKAGE_FILE}"
   local tmp_dir=""
   local libxnvctrl_rpm=""
   local chromium_common_rpm=""
@@ -137,7 +139,7 @@ gc_install_chromium() {
     return 0
   fi
 
-  gc_run dnf install -y policycoreutils policycoreutils-python-utils double-conversion libffi
+  gc_install_dnf_packages_if_missing policycoreutils policycoreutils-python-utils double-conversion libffi
   [[ -e /usr/lib64/libffi.so.8 ]] || gc_die "未找到 /usr/lib64/libffi.so.8，无法创建兼容软链接。"
   gc_run ln -sfn /usr/lib64/libffi.so.8 /usr/lib64/libffi.so.6
   gc_run ldconfig
@@ -213,7 +215,7 @@ gc_install_chromium() {
 }
 
 gc_install_sunlogin() {
-  local package_rpm="${GC_PACKAGES_DIR}/sunloginenterprise-5.4.3.rpm"
+  local package_rpm="${GC_PACKAGES_DIR}/${GC_SUNLOGIN_PACKAGE_FILE}"
   local package_name=""
 
   gc_require_file "${package_rpm}"
@@ -230,4 +232,102 @@ gc_install_sunlogin() {
   fi
 
   gc_run rpm -ivh "${package_rpm}"
+}
+
+gc_install_qt() {
+  local package_tar="${GC_PACKAGES_DIR}/${GC_QT_BINARY_PACKAGE_FILE}"
+  local tmp_dir=""
+  local qt_payload_dir=""
+  local qt_binary_source=""
+  local meta_dir=""
+  local runtime_packages_file=""
+  local desktop_file_source=""
+  local desktop_file_target="/usr/share/applications/org.qt-project.qtcreator.desktop"
+  local qt_binary=""
+  local package_list_decl=""
+  local -a qt_runtime_packages=()
+
+  gc_require_file "${package_tar}"
+
+  if [[ "${GC_DRY_RUN}" == "1" ]]; then
+    tar -tzf "${package_tar}" >/dev/null
+    gc_log_info "dry-run: 将解压 ${package_tar} 到 ${QT_INSTALL_DIR}"
+    gc_log_info "dry-run: 将创建命令链接 ${QT_BIN_LINK}"
+    gc_log_info "dry-run: 如包内带有依赖元数据，将自动安装 Qt Creator 运行依赖"
+    return 0
+  fi
+
+  gc_run mkdir -p "${GC_DEFAULT_TMP_ROOT}"
+  tmp_dir="$(mktemp -d "${GC_DEFAULT_TMP_ROOT%/}/qt.XXXXXX")"
+
+  gc_run tar -xzf "${package_tar}" -C "${tmp_dir}"
+  meta_dir="${tmp_dir}/.qt-package-meta"
+  runtime_packages_file="${meta_dir}/runtime-packages.conf"
+
+  if [[ -d "${tmp_dir}/qtcreator" ]]; then
+    qt_payload_dir="${tmp_dir}/qtcreator"
+  else
+    qt_binary_source="$(find "${tmp_dir}" -type f -path '*/bin/qtcreator' | head -n 1 || true)"
+    if [[ -n "${qt_binary_source}" ]]; then
+      qt_payload_dir="$(cd "$(dirname "${qt_binary_source}")/.." && pwd)"
+      gc_log_warn "Qt 压缩包未使用标准 qtcreator/ 顶层目录，自动识别为: ${qt_payload_dir}"
+    fi
+  fi
+
+  [[ -n "${qt_payload_dir}" && -d "${qt_payload_dir}" ]] || gc_die "未在压缩包中找到 Qt Creator 安装目录，请检查 ${package_tar} 的内部结构。"
+
+  if [[ -f "${runtime_packages_file}" ]]; then
+    # shellcheck disable=SC1090
+    source "${runtime_packages_file}"
+    if declare -p QT_RUNTIME_PACKAGES >/dev/null 2>&1; then
+      package_list_decl="$(declare -p QT_RUNTIME_PACKAGES 2>/dev/null)"
+      if [[ "${package_list_decl}" == declare\ -a* ]]; then
+        qt_runtime_packages=("${QT_RUNTIME_PACKAGES[@]}")
+      fi
+    fi
+  else
+    gc_log_warn "未找到 Qt 运行依赖元数据，将跳过依赖自动安装。"
+  fi
+
+  trap 'rm -rf "${tmp_dir}"' RETURN
+
+  if [[ "${#qt_runtime_packages[@]}" -gt 0 ]]; then
+    gc_install_dnf_packages_if_missing "${qt_runtime_packages[@]}"
+  fi
+
+  qt_binary="${QT_INSTALL_DIR}/bin/qtcreator"
+  if [[ -d "${QT_INSTALL_DIR}" ]]; then
+    if ! gc_prompt_confirm "检测到 ${QT_INSTALL_DIR} 已存在，是否覆盖安装？" "no"; then
+      gc_log_warn "按用户选择跳过 qt 安装。"
+      return 0
+    fi
+    gc_log_run "rm -rf ${QT_INSTALL_DIR}"
+    rm -rf "${QT_INSTALL_DIR}"
+  fi
+
+  gc_run mkdir -p "${QT_INSTALL_DIR}"
+  gc_log_run "cp -a ${qt_payload_dir}/. ${QT_INSTALL_DIR}/"
+  cp -a "${qt_payload_dir}/." "${QT_INSTALL_DIR}/"
+
+  [[ -f "${qt_binary}" ]] || gc_die "Qt Creator 主程序不存在: ${qt_binary}"
+
+  gc_run mkdir -p "$(dirname "${QT_BIN_LINK}")"
+  gc_run ln -sfn "${qt_binary}" "${QT_BIN_LINK}"
+
+  desktop_file_source="${meta_dir}/org.qt-project.qtcreator.desktop"
+  if [[ ! -f "${desktop_file_source}" && -f "${QT_INSTALL_DIR}/share/applications/org.qt-project.qtcreator.desktop" ]]; then
+    desktop_file_source="${QT_INSTALL_DIR}/share/applications/org.qt-project.qtcreator.desktop"
+  fi
+
+  if [[ -f "${desktop_file_source}" ]]; then
+    gc_run mkdir -p /usr/share/applications
+    gc_log_run "cp ${desktop_file_source} ${desktop_file_target}"
+    cp "${desktop_file_source}" "${desktop_file_target}"
+    if [[ -w "${desktop_file_target}" ]]; then
+      sed -i "s|^Exec=.*|Exec=${QT_BIN_LINK} %F|" "${desktop_file_target}"
+      sed -i "s|^TryExec=.*|TryExec=${QT_BIN_LINK}|" "${desktop_file_target}"
+    fi
+  else
+    gc_log_warn "未找到 Qt Creator 桌面启动文件，命令行入口仍可通过 ${QT_BIN_LINK} 使用。"
+  fi
 }

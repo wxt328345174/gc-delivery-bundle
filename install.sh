@@ -43,10 +43,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+gc_init_context "${ROOT_DIR}"
 GC_CONFIG_PATH="$(gc_resolve_path "${GC_CONFIG_PATH}")"
 export GC_DRY_RUN GC_CONFIG_PATH
 
-gc_init_context "${ROOT_DIR}"
 gc_init_log
 gc_load_config "${GC_CONFIG_PATH}"
 

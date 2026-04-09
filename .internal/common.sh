@@ -11,9 +11,19 @@ gc_init_context() {
   GC_INTERNAL_DIR="${GC_ROOT_DIR}/.internal"
   GC_DEFAULT_LOG_DIR="${GC_ROOT_DIR}/logs"
   GC_DEFAULT_TMP_ROOT="/tmp/gc-delivery-bundle"
-  GC_SUPPORTED_SOFTWARES=("runtime" "chromium" "sunlogin")
+
+  GC_RUNTIME_PACKAGE_FILE="install_runtime.zip"
+  GC_CHROMIUM_PACKAGE_FILE="chromium_installer_rpm.zip"
+  GC_SUNLOGIN_PACKAGE_FILE="sunloginenterprise-5.4.3.rpm"
+  GC_QT_SOURCE_PACKAGE_FILE="qt-creator-opensource-src-4.15.2.tar.gz"
+  GC_QT_BINARY_PACKAGE_FILE="qt-creator-4.15.2-openeuler-aarch64.tar.gz"
+
+  GC_SUPPORTED_SOFTWARES=("runtime" "chromium" "sunlogin" "qt")
   GC_REBOOT_REASONS=()
+
   export GC_ROOT_DIR GC_PACKAGES_DIR GC_INTERNAL_DIR GC_DEFAULT_LOG_DIR GC_DEFAULT_TMP_ROOT
+  export GC_RUNTIME_PACKAGE_FILE GC_CHROMIUM_PACKAGE_FILE GC_SUNLOGIN_PACKAGE_FILE
+  export GC_QT_SOURCE_PACKAGE_FILE GC_QT_BINARY_PACKAGE_FILE
 }
 
 gc_resolve_path() {
@@ -82,6 +92,10 @@ gc_die() {
 
 gc_require_file() {
   [[ -f "$1" ]] || gc_die "缺少文件: $1"
+}
+
+gc_require_dir() {
+  [[ -d "$1" ]] || gc_die "缺少目录: $1"
 }
 
 gc_require_command() {
@@ -246,6 +260,25 @@ gc_upsert_ini_key() {
   mv "${temp_file}" "${file_path}"
 }
 
+gc_install_dnf_packages_if_missing() {
+  local package_name=""
+  local missing_packages=()
+
+  for package_name in "$@"; do
+    [[ -n "${package_name}" ]] || continue
+    if ! rpm -q "${package_name}" >/dev/null 2>&1; then
+      missing_packages+=("${package_name}")
+    fi
+  done
+
+  if [[ "${#missing_packages[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  gc_log_info "待安装软件包: ${missing_packages[*]}"
+  gc_run dnf install -y "${missing_packages[@]}"
+}
+
 gc_load_config() {
   gc_require_file "${GC_CONFIG_PATH}"
   # shellcheck disable=SC1090
@@ -269,18 +302,24 @@ gc_load_config() {
   fi
 
   REBOOT_POLICY="${REBOOT_POLICY:-prompt}"
+
   RUNTIME_INSTALL_PATH="${RUNTIME_INSTALL_PATH:-/wa-edge}"
   RUNTIME_DATA_PATH="${RUNTIME_DATA_PATH:-${RUNTIME_INSTALL_PATH}/data}"
   RUNTIME_ETHERCAT_IFACE="${RUNTIME_ETHERCAT_IFACE:-en3}"
   RUNTIME_ETHERCAT_DRIVER="${RUNTIME_ETHERCAT_DRIVER:-generic}"
+
   CHROMIUM_USER="${CHROMIUM_USER:-gcuser}"
   CHROMIUM_ENABLE_AUTOLOGIN="${CHROMIUM_ENABLE_AUTOLOGIN:-true}"
   CHROMIUM_SESSION="${CHROMIUM_SESSION:-xfce}"
   CHROMIUM_PASSWORD="${CHROMIUM_PASSWORD:-}"
 
+  QT_INSTALL_DIR="${QT_INSTALL_DIR:-/opt/qtcreator-4.15.2}"
+  QT_BIN_LINK="${QT_BIN_LINK:-/usr/local/bin/qtcreator}"
+
   export REBOOT_POLICY
   export RUNTIME_INSTALL_PATH RUNTIME_DATA_PATH RUNTIME_ETHERCAT_IFACE RUNTIME_ETHERCAT_DRIVER
   export CHROMIUM_USER CHROMIUM_ENABLE_AUTOLOGIN CHROMIUM_SESSION CHROMIUM_PASSWORD
+  export QT_INSTALL_DIR QT_BIN_LINK
 
   gc_validate_reboot_policy "${REBOOT_POLICY}"
   gc_validate_bool_string "${CHROMIUM_ENABLE_AUTOLOGIN}"
@@ -312,7 +351,7 @@ gc_check_target_platform() {
     # shellcheck disable=SC1091
     source /etc/os-release
     if [[ "${ID:-}" != "openEuler" && "${ID:-}" != "openeuler" ]]; then
-      gc_log_warn "当前系统 ID=${ID:-unknown}，脚本按 openEuler 22.04 设计。"
+      gc_log_warn "当前系统 ID=${ID:-unknown}，脚本按 openEuler 22 系列设计。"
     fi
     if [[ -n "${VERSION_ID:-}" ]]; then
       gc_log_info "目标系统版本: ${VERSION_ID}"
@@ -332,31 +371,26 @@ gc_request_reboot() {
 }
 
 gc_run_base_setup() {
+  local command_name=""
+  local missing_tools=()
+
   gc_log_info "开始执行基础环境准备。"
   gc_require_root
   gc_require_linux
-  gc_require_command bash
-  gc_require_command dnf
-  gc_require_command rpm
-  gc_require_command systemctl
-  gc_require_command tar
-  gc_require_command unzip
-  gc_require_command grep
-  gc_require_command sed
-  gc_require_command mktemp
-  gc_require_command reboot
+  for command_name in bash dnf rpm systemctl tar unzip grep sed mktemp reboot cp rm find; do
+    gc_require_command "${command_name}"
+  done
   gc_check_target_platform
 
-  missing_packages=()
-  for package_name in sudo wget unzip; do
-    if ! command -v "${package_name}" >/dev/null 2>&1; then
-      missing_packages+=("${package_name}")
+  for command_name in sudo wget unzip; do
+    if ! command -v "${command_name}" >/dev/null 2>&1; then
+      missing_tools+=("${command_name}")
     fi
   done
 
-  if [[ "${#missing_packages[@]}" -gt 0 ]]; then
-    gc_log_info "待安装通用工具: ${missing_packages[*]}"
-    gc_run dnf install -y "${missing_packages[@]}"
+  if [[ "${#missing_tools[@]}" -gt 0 ]]; then
+    gc_log_info "待安装通用工具: ${missing_tools[*]}"
+    gc_run dnf install -y "${missing_tools[@]}"
   else
     gc_log_info "通用工具已就绪，无需安装。"
   fi
