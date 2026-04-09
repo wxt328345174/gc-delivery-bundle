@@ -118,8 +118,8 @@ gc_install_chromium() {
   local libxnvctrl_rpm=""
   local chromium_common_rpm=""
   local chromium_rpm=""
-  local user_created=0
   local lightdm_conf="/etc/lightdm/lightdm.conf"
+  local chromium_password=""
 
   gc_require_file "${package_zip}"
   gc_require_command ldconfig
@@ -132,6 +132,7 @@ gc_install_chromium() {
     unzip -l "${package_zip}" >/dev/null
     gc_log_info "dry-run: 将安装依赖 policycoreutils policycoreutils-python-utils double-conversion libffi"
     gc_log_info "dry-run: 将创建或复用用户 ${CHROMIUM_USER}"
+    gc_log_info "dry-run: 将把用户 ${CHROMIUM_USER} 的密码设置为与用户名相同"
     if gc_is_true "${CHROMIUM_ENABLE_AUTOLOGIN}"; then
       gc_log_info "dry-run: 将更新 /etc/lightdm/lightdm.conf，配置 ${CHROMIUM_USER}/${CHROMIUM_SESSION} 自动登录"
     fi
@@ -179,23 +180,16 @@ gc_install_chromium() {
     gc_log_info "用户 ${CHROMIUM_USER} 已存在，复用现有账号。"
   else
     gc_run useradd -m "${CHROMIUM_USER}"
-    user_created=1
   fi
 
   if ! id -nG "${CHROMIUM_USER}" | grep -qw wheel; then
     gc_run usermod -aG wheel "${CHROMIUM_USER}"
   fi
 
-  if [[ -z "${CHROMIUM_PASSWORD}" && "${user_created}" == "1" ]]; then
-    CHROMIUM_PASSWORD="$(gc_prompt_secret "请输入 ${CHROMIUM_USER} 的登录密码")"
-  fi
-
-  if [[ -n "${CHROMIUM_PASSWORD}" ]]; then
-    gc_log_run "printf '<hidden>' | chpasswd"
-    printf '%s:%s\n' "${CHROMIUM_USER}" "${CHROMIUM_PASSWORD}" | chpasswd
-  else
-    gc_log_warn "未设置 ${CHROMIUM_USER} 密码；如需密码登录，请后续手动执行 passwd ${CHROMIUM_USER}。"
-  fi
+  chromium_password="${CHROMIUM_USER}"
+  gc_log_run "printf '<hidden>' | chpasswd"
+  printf '%s:%s\n' "${CHROMIUM_USER}" "${chromium_password}" | chpasswd
+  gc_log_info "已将 ${CHROMIUM_USER} 的密码设置为与用户名相同。"
 
   if gc_is_true "${CHROMIUM_ENABLE_AUTOLOGIN}"; then
     if [[ ! -f "${lightdm_conf}" ]]; then
