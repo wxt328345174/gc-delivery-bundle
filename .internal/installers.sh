@@ -5,6 +5,14 @@ if [[ -n "${GC_INTERNAL_INSTALLERS_LOADED:-}" ]]; then
 fi
 GC_INTERNAL_INSTALLERS_LOADED=1
 
+gc_runtime_igh_package_name() {
+  printf 'ethcat_%s_%s.tar.gz\n' "$(uname -m)" "$(uname -r)"
+}
+
+gc_runtime_igh_package_path() {
+  printf '%s/%s\n' "${GC_PACKAGES_DIR}" "$(gc_runtime_igh_package_name)"
+}
+
 gc_run_selected_installers() {
   local software_id=""
 
@@ -39,9 +47,26 @@ gc_install_runtime() {
   local ethercat_tmp="/tmp/build_igh"
   local runtime_runner=""
   local set_ecat_script=""
+  local runtime_igh_package_name=""
+  local runtime_igh_package_path=""
+  local runtime_igh_listing=""
+  local use_prebuilt_igh="no"
+  local ethercat_conf_path="/etc/ethercat.conf"
+  local ethercat_sysconfig_path="/etc/sysconfig/ethercat"
+  local ethercat_backup_conf_path="/usr/local/etc/ethercat.conf"
+  local current_kernel_release=""
+  local installed_master_module=""
 
   gc_require_file "${package_zip}"
   gc_require_command readlink
+  gc_require_command tar
+  gc_require_command uname
+
+  runtime_igh_package_name="$(gc_runtime_igh_package_name)"
+  runtime_igh_package_path="$(gc_runtime_igh_package_path)"
+  [[ -f "${runtime_igh_package_path}" ]] && use_prebuilt_igh="yes"
+  current_kernel_release="$(uname -r)"
+  installed_master_module="/lib/modules/${current_kernel_release}/ethercat/master/ec_master.ko"
 
   [[ -d "${RUNTIME_INSTALL_PATH}/board" ]] && existing_markers+=("${RUNTIME_INSTALL_PATH}/board")
   [[ -f /etc/ethercat.conf ]] && existing_markers+=("/etc/ethercat.conf")
@@ -60,9 +85,17 @@ gc_install_runtime() {
   if [[ "${GC_DRY_RUN}" == "1" ]]; then
     unzip -l "${package_zip}" >/dev/null
     gc_log_info "dry-run: 将解压 ${package_zip}"
-    gc_log_info "dry-run: 将准备内核目录 ${build_path}"
-    gc_log_info "dry-run: 将调用 wasom_codex_install_arm64.sh -p ${RUNTIME_INSTALL_PATH} -d ${RUNTIME_DATA_PATH}"
-    gc_log_info "dry-run: 将自动输入 b 以源码编译 EtherCAT"
+    if [[ "${use_prebuilt_igh}" == "yes" ]]; then
+      gc_log_info "dry-run: 检测到预编译 IGH 包 ${runtime_igh_package_path}"
+      gc_log_info "dry-run: 将复制 ${runtime_igh_package_name} 到万昇安装器同级目录"
+      gc_log_info "dry-run: 将直接调用 wasom_codex_install_arm64.sh -p ${RUNTIME_INSTALL_PATH} -d ${RUNTIME_DATA_PATH}"
+      gc_log_info "dry-run: 本次将跳过现场编译 IGH"
+    else
+      gc_log_info "dry-run: 未检测到预编译 IGH 包 ${runtime_igh_package_path}"
+      gc_log_info "dry-run: 将准备内核目录 ${build_path}"
+      gc_log_info "dry-run: 将调用 wasom_codex_install_arm64.sh -p ${RUNTIME_INSTALL_PATH} -d ${RUNTIME_DATA_PATH}"
+      gc_log_info "dry-run: 将自动输入 b 以源码编译 IGH EtherCAT"
+    fi
     gc_log_info "dry-run: 将配置 EtherCAT 网卡 ${RUNTIME_ETHERCAT_IFACE} / 驱动 ${RUNTIME_ETHERCAT_DRIVER}"
     gc_request_reboot "runtime 安装后通常需要重启，使 EtherCAT 和 plc-runtime 生效。"
     return 0
@@ -76,19 +109,34 @@ gc_install_runtime() {
   runtime_runner="${tmp_dir}/wasom_codex_install_arm64.sh"
   set_ecat_script="${tmp_dir}/setECAT.sh"
 
-  gc_require_file "${tmp_dir}/${kernel_tar}"
-  gc_require_file "${tmp_dir}/${ethercat_zip}"
   gc_require_file "${runtime_runner}"
   gc_require_file "${set_ecat_script}"
   gc_run chmod +x "${runtime_runner}" "${set_ecat_script}"
 
-  if [[ -L "${build_path}" ]]; then
-    gc_run rm -f "${build_path}"
+  if [[ "${use_prebuilt_igh}" == "yes" ]]; then
+    gc_require_file "${runtime_igh_package_path}"
+    runtime_igh_listing="$(tar -tzf "${runtime_igh_package_path}")"
+    if ! grep -qx 'ethcat/install_env.sh' <<< "${runtime_igh_listing}"; then
+      gc_die "预编译 IGH 包缺少 ethcat/install_env.sh: ${runtime_igh_package_path}"
+    fi
+    if ! grep -qx 'modules/ec_master.ko' <<< "${runtime_igh_listing}"; then
+      gc_die "预编译 IGH 包缺少 modules/ec_master.ko: ${runtime_igh_package_path}"
+    fi
+    gc_log_info "检测到预编译 IGH 包，安装时将优先直接安装: ${runtime_igh_package_path}"
+    gc_run cp -f "${runtime_igh_package_path}" "${tmp_dir}/${runtime_igh_package_name}"
+  else
+    gc_log_warn "未检测到预编译 IGH 包，回退到现场源码编译。期望文件: ${runtime_igh_package_path}"
+    gc_require_file "${tmp_dir}/${kernel_tar}"
+    gc_require_file "${tmp_dir}/${ethercat_zip}"
+
+    if [[ -L "${build_path}" ]]; then
+      gc_run rm -f "${build_path}"
+    fi
+    gc_run mkdir -p "${build_path}"
+    gc_run tar -xf "${tmp_dir}/${kernel_tar}" -C "${build_path}"
+    gc_run mkdir -p "${ethercat_tmp}"
+    gc_run cp -f "${tmp_dir}/${ethercat_zip}" "${ethercat_tmp}/"
   fi
-  gc_run mkdir -p "${build_path}"
-  gc_run tar -xf "${tmp_dir}/${kernel_tar}" -C "${build_path}"
-  gc_run mkdir -p "${ethercat_tmp}"
-  gc_run cp -f "${tmp_dir}/${ethercat_zip}" "${ethercat_tmp}/"
 
   if [[ ! -e /usr/bin/python ]]; then
     gc_run ln -s /usr/bin/python3 /usr/bin/python
@@ -101,11 +149,35 @@ gc_install_runtime() {
     gc_log_warn "/usr/bin/python 已存在且不是软链接，未自动覆盖。"
   fi
 
-  gc_log_run "cd ${tmp_dir} && printf 'b\\n' | env reboot_now=no ./wasom_codex_install_arm64.sh -p ${RUNTIME_INSTALL_PATH} -d ${RUNTIME_DATA_PATH}"
-  (
-    cd "${tmp_dir}"
-    printf 'b\n' | env reboot_now=no ./wasom_codex_install_arm64.sh -p "${RUNTIME_INSTALL_PATH}" -d "${RUNTIME_DATA_PATH}"
-  )
+  if [[ "${use_prebuilt_igh}" == "yes" ]]; then
+    gc_log_run "cd ${tmp_dir} && env reboot_now=no ./wasom_codex_install_arm64.sh -p ${RUNTIME_INSTALL_PATH} -d ${RUNTIME_DATA_PATH}"
+    (
+      cd "${tmp_dir}"
+      env reboot_now=no ./wasom_codex_install_arm64.sh -p "${RUNTIME_INSTALL_PATH}" -d "${RUNTIME_DATA_PATH}"
+    )
+  else
+    gc_log_run "cd ${tmp_dir} && printf 'b\\n' | env reboot_now=no ./wasom_codex_install_arm64.sh -p ${RUNTIME_INSTALL_PATH} -d ${RUNTIME_DATA_PATH}"
+    (
+      cd "${tmp_dir}"
+      printf 'b\n' | env reboot_now=no ./wasom_codex_install_arm64.sh -p "${RUNTIME_INSTALL_PATH}" -d "${RUNTIME_DATA_PATH}"
+    )
+  fi
+
+  if [[ ! -f "${installed_master_module}" ]]; then
+    gc_die "runtime 安装后未检测到 EtherCAT 主模块: ${installed_master_module}"
+  fi
+
+  if [[ ! -e "${ethercat_conf_path}" ]]; then
+    if [[ -f "${ethercat_sysconfig_path}" ]]; then
+      gc_log_info "检测到 EtherCAT 配置实际位于 ${ethercat_sysconfig_path}，将创建 ${ethercat_conf_path} 兼容链接。"
+      gc_run ln -sfn "${ethercat_sysconfig_path}" "${ethercat_conf_path}"
+    elif [[ -f "${ethercat_backup_conf_path}" ]]; then
+      gc_log_warn "未找到 ${ethercat_sysconfig_path}，回退使用 ${ethercat_backup_conf_path} 作为 EtherCAT 配置源。"
+      gc_run ln -sfn "${ethercat_backup_conf_path}" "${ethercat_conf_path}"
+    else
+      gc_die "runtime 安装完成后未找到 EtherCAT 配置文件。已检查: ${ethercat_sysconfig_path}, ${ethercat_backup_conf_path}"
+    fi
+  fi
 
   gc_run "${set_ecat_script}" "${RUNTIME_ETHERCAT_IFACE}" "${RUNTIME_ETHERCAT_DRIVER}"
   gc_run systemctl enable ethercat
